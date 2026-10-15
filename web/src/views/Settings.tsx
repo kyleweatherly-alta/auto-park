@@ -1,10 +1,12 @@
 import { useMemo, useState, type FormEvent } from "react";
-import type { EngineMode, Profile, Vehicle } from "../../../shared/types.ts";
+import type { EngineMode, Profile, Status, Vehicle } from "../../../shared/types.ts";
 import { formatPhone, normalizeNickname, normalizePhone, normalizePlate, normalizePromo } from "../../../shared/validate.ts";
-import { api, HttpError } from "../api.ts";
+import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
 import { Banner, Button, Card, cx, Field, Page } from "../components/ui.tsx";
 import { newKey } from "../format.ts";
 import { navigate } from "../router.ts";
+import { startPurchase } from "../start.ts";
+import { forgetEverything, saveProfile, storageWorks } from "../store.ts";
 import { useRates } from "./Home.tsx";
 
 type Draft = {
@@ -57,18 +59,19 @@ function validate(d: Draft): Record<string, string> {
   return errors;
 }
 
-export function Settings({ profile, onProfile }: { profile: Profile; onProfile: (p: Profile) => void }) {
-  const [draft, setDraft] = useState<Draft>(() => toDraft(profile));
+export function Settings({ profile, status, engine }: { profile: Profile; status: Status; engine: EngineMode }) {
+  const [draft, setDraft] = useState<Draft>(() => ({ ...toDraft(profile), engine }));
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [touched, setTouched] = useState<Record<string, boolean>>({});
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [testing, setTesting] = useState(false);
-  const { rates } = useRates();
+  const { rates } = useRates(draft.engine);
+  const [confirmForget, setConfirmForget] = useState(false);
   const firstRun = profile.vehicles.length === 0 || !profile.phone;
 
-  const dirty = useMemo(() => JSON.stringify(toDraft(profile)) !== JSON.stringify(draft), [profile, draft]);
+  const dirty = useMemo(() => JSON.stringify({ ...toDraft(profile), engine }) !== JSON.stringify(draft), [profile, engine, draft]);
   const liveErrors = useMemo(() => validate(draft), [draft]);
   const shown = (key: string) => errors[key] ?? (touched[key] ? liveErrors[key] : undefined);
 
@@ -97,55 +100,45 @@ export function Settings({ profile, onProfile }: { profile: Profile; onProfile: 
       return;
     }
     setSaving(true);
-    try {
-      const next = await api.saveProfile({
-        vehicles: draft.vehicles.map(({ key: _k, ...rest }) => rest),
-        defaultVehicleId: draft.defaultVehicleId,
-        phone: draft.phone,
-        promoCode: draft.promoCode,
-        preferredRate: draft.preferredRate,
-        engine: draft.engine,
-      });
-      onProfile(next);
-      setDraft(toDraft(next));
-      setTouched({});
-      setSaved(true);
-      if (firstRun) navigate("/", { replace: true });
-    } catch (err) {
-      const he = err as HttpError;
-      if (he.body?.fields) {
-        setErrors(he.body.fields);
-        focusFirstError();
-      }
-      setFormError(he.message);
-    } finally {
-      setSaving(false);
-    }
+    const vehicles = draft.vehicles.map(({ key: _k, ...v }) => ({
+      id: v.id || newKey(),
+      plate: (normalizePlate(v.plate) as { value: string }).value,
+      nickname: (normalizeNickname(v.nickname) as { value: string }).value,
+    }));
+    const defaultVehicleId = vehicles.some((v) => v.id === draft.defaultVehicleId) ? draft.defaultVehicleId : vehicles[0]!.id;
+    const next: Profile = {
+      vehicles,
+      defaultVehicleId,
+      phone: (normalizePhone(draft.phone) as { value: string }).value,
+      promoCode: (normalizePromo(draft.promoCode) as { value: string }).value,
+      preferredRate: draft.preferredRate,
+      engine: draft.engine,
+    };
+    saveProfile(next);
+    setDraft({ ...toDraft(next), engine: draft.engine });
+    setTouched({});
+    setSaved(true);
+    setSaving(false);
+    if (firstRun) navigate("/", { replace: true });
   }
 
   async function testRun() {
-    const vehicleId = profile.defaultVehicleId ?? profile.vehicles[0]?.id;
-    if (!vehicleId) return;
+    const vehicle = profile.vehicles.find((v) => v.id === profile.defaultVehicleId) ?? profile.vehicles[0];
+    if (!vehicle) return;
     setTesting(true);
     setFormError(null);
-    try {
-      const { run } = await api.startRun({ vehicleId, rateName: profile.preferredRate, dryRun: true, idempotencyKey: newKey() });
-      navigate(`/run/${run.id}`);
-    } catch (err) {
-      const he = err as HttpError;
-      if (he.body?.error === "busy" && he.body.run) navigate(`/run/${he.body.run.id}`);
-      else setFormError(he.message);
+    const result = await startPurchase({ profile, vehicle, rateName: profile.preferredRate, engine, dryRun: true, idempotencyKey: newKey() });
+    if (result.kind === "started") navigate(`/run/${result.run.id}`);
+    else {
+      setFormError(result.kind === "failed" ? result.message : "Couldn't start the test.");
       setTesting(false);
     }
   }
 
-  async function signOut() {
-    try {
-      await api.logout();
-    } finally {
-      window.location.hash = "";
-      window.location.reload();
-    }
+  function forget() {
+    forgetEverything();
+    setConfirmForget(false);
+    navigate("/", { replace: true });
   }
 
   const rateChoices = rates?.length ? rates : profile.preferredRate ? [{ name: profile.preferredRate, shortName: profile.preferredRate }] : [];
@@ -262,7 +255,7 @@ export function Settings({ profile, onProfile }: { profile: Profile; onProfile: 
           <fieldset>
             <legend className="text-lg font-semibold">Purchase method</legend>
             <div className="mt-3 flex flex-col gap-2">
-              {ENGINES.map((e) => (
+              {ENGINES.filter((e) => status.engines.includes(e.value)).map((e) => (
                 <label
                   key={e.value}
                   className={cx(
@@ -314,9 +307,29 @@ export function Settings({ profile, onProfile }: { profile: Profile; onProfile: 
         </Card>
       )}
 
-      <Button variant="ghost" onClick={signOut} className="self-center">
-        Sign out of this device
-      </Button>
+      <Card className="flex flex-col gap-3">
+        <h2 className="text-lg font-semibold">Privacy</h2>
+        <p className="text-slate-700">
+          Your plate, phone, promo code and history are saved only in this browser on this device. Auto-Park's server uses them for a purchase and then forgets them.
+        </p>
+        {!storageWorks && (
+          <Banner tone="warning">This browser is blocking storage (private mode?), so your details will be forgotten when you close the tab.</Banner>
+        )}
+        <Button variant="danger" onClick={() => setConfirmForget(true)}>
+          Forget my details on this device
+        </Button>
+      </Card>
+
+      <ConfirmDialog
+        open={confirmForget}
+        title="Forget your details?"
+        confirmLabel="Forget everything"
+        cancelLabel="Keep them"
+        onConfirm={forget}
+        onCancel={() => setConfirmForget(false)}
+      >
+        <p>This removes your vehicles, phone number, promo code and purchase history from this device. Parking you already bought isn't affected.</p>
+      </ConfirmDialog>
     </Page>
   );
 }

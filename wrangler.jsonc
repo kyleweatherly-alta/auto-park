@@ -1,0 +1,23 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "auto-park",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-09-01",
+  "assets": {
+    "directory": "./dist/web",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "AUTOPARK", "class_name": "AutoParkDO" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["AutoParkDO"] }],
+  "vars": {
+    "LOT_CODE": "Q60x6xih",
+    "LOT_NAME": "MAC Member Parking",
+    "PARK_ENGINE": "api",
+    "RUNS_PER_HOUR": "30"
+  },
+  "observability": { "enabled": true }
+}

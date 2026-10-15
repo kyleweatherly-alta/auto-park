@@ -101,13 +101,13 @@ export class FakeEngine implements Engine {
     ctx.step("rate", "done", `${rate.shortName} · ${formatMoney(rate.amount)}`);
 
     if (req.promoCode) {
-      ctx.step("promo", "active", req.promoCode);
+      ctx.step("promo", "active");
       await this.wait(ctx.signal);
       if (p.startsWith("TESTPROMO")) {
         ctx.step("promo", "failed");
         return outcome("promo_rejected", "TapNPark says the promo code isn't valid. Nothing was bought.", { rateName: rate.name });
       }
-      ctx.step("promo", "done", req.promoCode);
+      ctx.step("promo", "done", "Applied");
     } else {
       ctx.step("promo", "skipped", "No promo code");
     }
@@ -128,7 +128,7 @@ export class FakeEngine implements Engine {
     if (req.dryRun) {
       ctx.step("checkout", "skipped", "Test run");
       ctx.step("receipt", "skipped", "Test run");
-      return outcome("dry_run_ok", `Test run passed: ${rate.shortName} would cost $0.00 with ${req.promoCode}. Nothing was bought.`, {
+      return outcome("dry_run_ok", `Test run passed: ${rate.shortName} would cost $0.00 with your promo code. Nothing was bought.`, {
         amountDue: 0,
         rateName: rate.name,
         promoApplied: true,

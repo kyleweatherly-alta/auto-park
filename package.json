@@ -8,38 +8,40 @@
     "node": ">=20.11"
   },
   "scripts": {
-    "dev": "concurrently -k -n api,web -c blue,magenta \"PORT=${API_PORT:-8787} tsx watch --env-file-if-exists=.env server/src/index.ts\" \"vite\"",
-    "build": "vite build && esbuild server/src/index.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/server/index.js",
-    "start": "node --env-file-if-exists=.env dist/server/index.js",
+    "dev": "concurrently -k -n api,web -c blue,magenta \"PORT=${API_PORT:-8787} tsx watch --env-file-if-exists=.env server/src/node.ts\" \"vite\"",
+    "build": "vite build && esbuild server/src/node.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/server/node.js",
+    "start": "node --env-file-if-exists=.env dist/server/node.js",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p worker/tsconfig.json",
     "install:browser": "playwright install chromium",
     "check:tapnpark": "tsx --env-file-if-exists=.env scripts/check-tapnpark.ts",
-    "icons": "tsx scripts/make-icons.ts"
+    "icons": "tsx scripts/make-icons.ts",
+    "cf:dev": "vite build && wrangler dev --port 8790",
+    "deploy": "vite build && wrangler deploy"
   },
   "dependencies": {
-    "express": "^5.3.0",
+    "@hono/node-server": "^2.1.5",
+    "hono": "^4.13.13",
     "playwright": "^1.64.1",
     "zod": "^3.25.76"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261015.1",
     "@tailwindcss/vite": "^4.3.3",
-    "@types/express": "^5.0.6",
     "@types/node": "^26.6.5",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
-    "@types/supertest": "^7.2.1",
     "@vitejs/plugin-react": "^6.1.2",
     "concurrently": "^10.0.6",
     "esbuild": "^0.28.2",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
-    "supertest": "^7.3.1",
     "tailwindcss": "^4.3.3",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vite": "^8.3.4",
-    "vitest": "^5.0.5"
+    "vitest": "^5.0.5",
+    "wrangler": "^4.151.0"
   }
 }

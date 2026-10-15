@@ -6,9 +6,9 @@ The original is at https://auto-park-filler.replit.app; [SPEC.md](SPEC.md) descr
 
 | Before | Now |
 |---|---|
-| Anyone with the URL could read your plate and phone, change them, or **buy parking**. | Every API route needs a passcode login: a signed, httpOnly cookie that lasts 90 days. Wrong guesses are rate-limited. |
-| Plate, phone and promo code were hard-coded in the public JavaScript. | They live only in server-side config and storage. The built client contains none of them (checked). |
-| — | Security headers (CSP, no framing), cross-site write protection, no third-party fonts. |
+| Anyone with the URL could read your plate and phone, change them, or **buy parking with your details**. | The site is public with no login, but the server holds **no** personal details. Each phone keeps its own plate, phone, promo code and history in its browser and sends them only with a purchase. A visitor sees an empty form. |
+| Plate, phone and promo code were hard-coded in the public JavaScript. | Nothing personal is in the code, the server config or the logs. Phone numbers and promo codes never come back from the server (tested). |
+| — | Abuse limits for a public site: 30 purchases per visitor per hour, at most 5 at once, one at a time per plate, and purchases started from other websites are refused. Security headers (CSP, no framing) and no third-party fonts. |
 
 ## Correctness and safety
 
@@ -32,7 +32,7 @@ The original is at https://auto-park-filler.replit.app; [SPEC.md](SPEC.md) descr
 
 - Home screen is one big **Park ‹your plate›** button. The vehicle and time you used last are remembered.
 - Multiple vehicles, chosen with one tap.
-- History of every purchase and test run.
+- History of every purchase and test run made from that device.
 - **Test run** goes through everything except checkout. Use it to confirm the promo still works.
 
 ## Mobile and accessibility
@@ -42,7 +42,12 @@ The original is at https://auto-park-filler.replit.app; [SPEC.md](SPEC.md) descr
 - Keyboard-accessible chips and dialogs, an announced progress area, and AA-contrast text.
 - Fixed the lot code rendering as "Q60×6xih".
 
+## Hosting
+
+Live at **https://auto-park.kyle-weatherly.workers.dev** on Cloudflare Workers. A Durable Object coordinates purchases in memory. The Mac version (`npm run dev` or `npm start`) still runs the same app and adds the browser engine.
+
 ## Not verified yet
 
 - **A real purchase hasn't been made with the new app.** Both engines passed a live test run against TapNPark on 2026-10-15 (your plate, 3 Hours, your member promo code → TapNPark's cart showed "Due Today $0", stopped before Checkout). The checkout step itself (`/payment-intent`, `/pay`, the receipt and end time) has only been exercised in simulation and unit tests.
+- On the live Cloudflare site, a simulated purchase and live rate loading were tested; a test run with real details hasn't been done from it yet (the earlier live test ran from the Mac).
 - Only the 3 Hours rate was tested with your promo code. Use **Settings → Run a test** after picking another default time to check it before relying on it.

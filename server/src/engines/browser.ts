@@ -220,7 +220,7 @@ export class BrowserEngine implements Engine {
     // 4. Promo
     let promoApplied = false;
     if (req.promoCode) {
-      ctx.step("promo", "active", req.promoCode);
+      ctx.step("promo", "active");
       await page.getByPlaceholder("CODE").fill(req.promoCode);
       const [promoRes] = await Promise.all([
         page.waitForResponse(isApi("/promo"), { timeout: STEP_TIMEOUT }).catch(() => null),
@@ -231,12 +231,12 @@ export class BrowserEngine implements Engine {
       if (!promoData || promoData.status >= 400 || !td) {
         ctx.step("promo", "failed");
         const reason = promoData?.body?.failReason ? ` (${promoData.body.failReason})` : "";
-        return outcome("promo_rejected", `TapNPark didn't accept the promo code ${req.promoCode}${reason}. Nothing was bought.`, { rateName: rate.name });
+        return outcome("promo_rejected", `TapNPark didn't accept the promo code${reason}. Nothing was bought.`, { rateName: rate.name });
       }
       await text(/applied!/).first().waitFor();
       amountDue = Number(td.amountDue);
       promoApplied = true;
-      ctx.step("promo", "done", td.promoCodeRedeemCopy || req.promoCode);
+      ctx.step("promo", "done", "Applied");
     } else {
       ctx.step("promo", "skipped", "No promo code");
     }
@@ -264,7 +264,7 @@ export class BrowserEngine implements Engine {
       ctx.step("receipt", "skipped", "Test run");
       return outcome(
         "dry_run_ok",
-        `Test run passed: ${shortRateName(rate.name)} would cost $0.00${promoApplied ? ` with ${req.promoCode}` : ""}. Nothing was bought.`,
+        `Test run passed: ${shortRateName(rate.name)} would cost $0.00${promoApplied ? " with your promo code" : ""}. Nothing was bought.`,
         { amountDue: 0, rateName: rate.name, promoApplied },
       );
     }

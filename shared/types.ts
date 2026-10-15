@@ -9,6 +9,7 @@ export interface Vehicle {
   nickname: string;
 }
 
+/** Saved only in the browser on each device; the server never stores it. */
 export interface Profile {
   vehicles: Vehicle[];
   defaultVehicleId: string | null;
@@ -128,11 +129,15 @@ export type RunEvent =
   | { type: "done"; run: Run };
 
 export interface StartRunRequest {
-  vehicleId: string;
+  plate: string;
+  /** Any common US format; normalized server-side. Never stored. */
+  phone: string;
+  promoCode: string;
   rateName?: string;
+  /** Shown in the run header, e.g. a vehicle nickname. */
+  vehicleName?: string;
+  engine?: EngineMode;
   dryRun?: boolean;
-  /** Buy even though our history says this plate is already parked. */
-  force?: boolean;
   /** Continue even if TapNPark's camera saw the car in a different lot. */
   allowLotMismatch?: boolean;
   /** One per tap, so a double-tap or retry never starts two purchases. */
@@ -141,15 +146,14 @@ export interface StartRunRequest {
 
 export interface Status {
   lotName: string;
-  engine: EngineMode;
-  activeRun: Run | null;
-  /** Latest successful purchase whose session hasn't ended yet. */
-  parkedUntil: { plate: string; endTime: string; runId: string } | null;
+  /** Purchase methods this server can run (no browser engine in the cloud). */
+  engines: EngineMode[];
+  defaultEngine: EngineMode;
 }
 
 export type ApiError = {
   error: string;
   message: string;
   run?: Run;
-  until?: string;
+  fields?: Record<string, string>;
 };

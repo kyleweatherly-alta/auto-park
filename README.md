@@ -2,17 +2,52 @@
 
 One-tap parking for the **MAC Member Parking** lot on TapNPark (lot `Q60x6xih`). Open it, pick a time, tap **Park**. It applies your promo code and buys the session only if the total comes to **$0.00**. Then it shows when the session ends.
 
-- **Passcode-protected.** Your plate, phone number and promo code are kept on the server, never in the page.
+**Live:** https://auto-park.kyle-weatherly.workers.dev (public, no login)
+
+- **Your details stay on your phone.** Your plate, phone number, promo code and history are saved only in your browser. The server uses them for one purchase and keeps nothing, so a visitor sees an empty form, never yours.
 - **Live progress.** The checklist shows the real steps, and you can cancel at any point up to checkout.
-- **No double buys.** Only one purchase can run at a time, a repeated tap is ignored, and it asks first if your plate is already parked.
-- **Two ways to buy.** The fast engine talks to TapNPark's API (about 1.5 s). The browser engine taps through TapNPark's website (about 4–5 s, more on a slow connection). In *Automatic* mode, the browser takes over if the fast engine breaks before checkout.
+- **No double buys.** Only one purchase per plate runs at a time, a repeated tap is ignored, and the app asks first if your plate is already parked.
+- **Two ways to buy.** The fast engine talks to TapNPark's API (about 1.5 s); it's the only one online. On this Mac there's also a browser engine that taps through TapNPark's website (about 4 s). In *Automatic* mode the browser takes over if the fast engine breaks before checkout.
 - **Extras.** History, multiple vehicles, remembered choices, and test runs that stop before checkout.
 
 See [SPEC.md](SPEC.md) for how the original app worked and [CHANGES.md](CHANGES.md) for what's different.
 
 ---
 
-## Run it locally
+## Using it
+
+1. Open the live link on your phone and tap **Set up**. Enter your plate, the phone number for receipts, and your promo code.
+2. Optional: **Share → Add to Home Screen**, so it opens like an app.
+3. Tap **Park ‹your plate›**. You're parked when it says "Parked until …", and TapNPark texts you the receipt.
+
+Before relying on a new parking time or promo code, open **Settings** and tap **Run a test**. It goes all the way to checkout and stops, so you can confirm the total is $0.00 without buying anything.
+
+Each browser keeps its own details. Another phone, or a private window, starts empty. **Settings → Forget my details on this device** clears them.
+
+## Deploy updates (Cloudflare)
+
+The site is a Cloudflare Worker (`wrangler.jsonc`). It serves the built web app as static assets and sends `/api/*` to one Durable Object, which runs purchases in memory and stores nothing. To publish a change:
+
+```bash
+npm run deploy
+```
+
+That builds the web app and runs `wrangler deploy`. You must be logged in with `npx wrangler login`. Settings live in `vars` in `wrangler.jsonc`:
+- `PARK_ENGINE` is `api`.
+- `RUNS_PER_HOUR` caps how many purchases each visitor can start per hour (30).
+- `LOT_CODE` and `LOT_NAME` identify the lot.
+
+There are no secrets to set.
+
+To try the Worker locally before deploying:
+
+```bash
+npm run cf:dev
+```
+
+Then open http://localhost:8790.
+
+## Run it on this Mac
 
 Requirements: Node 20.11+ (tested on Node 24).
 
@@ -24,23 +59,13 @@ npm install
 cp .env.example .env
 ```
 
-Fill in `.env`:
-
-| Variable | What it is |
-|---|---|
-| `APP_PASSCODE` | What you type to unlock the app (4+ characters). |
-| `SESSION_SECRET` | 32+ random characters. Generate one with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` |
-| `DEFAULT_PLATE`, `DEFAULT_PHONE`, `DEFAULT_PROMO` | Seed your profile on first run. You can edit them in the app later. |
-| `DEFAULT_RATE` | e.g. `MAC Member - 3 Hours`. Leave it empty to use the first listed time. |
-| `PARK_ENGINE` | `fake` (simulated; nothing is bought), `auto`, `api` or `browser`. **Start with `fake`.** |
-
-Then:
+Set `PARK_ENGINE` in `.env`. Use `fake` while developing; nothing is bought. The other choices are `auto`, `api` and `browser`. Then:
 
 ```bash
 npm run dev
 ```
 
-Open http://localhost:5173. The API runs on port 8787 behind Vite's proxy.
+Open http://localhost:5173. The API runs on port 8787 behind Vite's proxy. In the Claude desktop app you can also open the **Auto-Park** preview.
 
 **Simulation mode** (`PARK_ENGINE=fake`, or *Settings → Purchase method → Simulation*) never contacts TapNPark. Plates starting with these prefixes trigger the failure screens:
 
@@ -53,31 +78,13 @@ Open http://localhost:5173. The API runs on port 8787 behind Vite's proxy.
 | `TESTBROKEN` | Engine error before checkout |
 | `TESTUNKNOWN` | Error during checkout (outcome unknown) |
 
-**Browser engine** needs Chromium:
+The **browser engine** needs Chromium:
 
 ```bash
 npm run install:browser
 ```
 
-### Tests and checks
-
-```bash
-npm test
-```
-
-Runs 59 tests: validation, both engines' guard rails, the run manager (single-flight, idempotency, fallback, cancel, timeout), and API auth.
-
-```bash
-npm run typecheck
-```
-
-```bash
-npm run check:tapnpark
-```
-
-`check:tapnpark` is read-only. It confirms TapNPark's API and screens still look the way Auto-Park expects. It sends no plate, phone or code. Run it if purchases start failing.
-
-### Production build
+For a production-style local server:
 
 ```bash
 npm run build
@@ -87,22 +94,39 @@ npm run build
 npm start
 ```
 
-`npm start` serves the app and API on `PORT` (default 8787). Set `NODE_ENV=production` so the login cookie is marked `Secure`; production refuses to start without a strong `SESSION_SECRET`.
+Then open http://localhost:8787.
+
+### Tests and checks
+
+```bash
+npm test
+```
+
+Runs 65 tests. They cover:
+- input validation and the this-device history guards,
+- both engines' guard rails,
+- the run manager: per-plate locking, the concurrency cap, idempotency, fallback, cancel and timeout,
+- the public API: validation, rate limiting and cross-site blocking, and a check that phone numbers and promo codes never come back from the server.
+
+```bash
+npm run typecheck
+```
+
+This checks both the Mac and Cloudflare builds.
+
+```bash
+npm run check:tapnpark
+```
+
+`check:tapnpark` is read-only. It confirms TapNPark's API and screens still look the way Auto-Park expects. It sends no plate, phone or code. Run it if purchases start failing.
 
 ---
 
-## Using it day to day
+## Privacy and safety
 
-Auto-Park is a local Claude Code project. It runs on this Mac and isn't hosted anywhere.
-
-- **From the Claude desktop app:** ask Claude to start Auto-Park, or open the **Auto-Park** preview (its entry is in `~/.claude/launch.json`). It opens at http://localhost:5195.
-- **From a terminal:** run `npm run build`, then `npm start`, and open http://localhost:8787.
-
-Your profile, history and screenshots stay in `data/` on this Mac, and your settings stay in `.env`. Neither is committed to git. The app only works while it's running on the Mac, so there's no address to open from your phone.
-
-Before relying on a new parking time or promo code, open **Settings** and tap **Run a test**. It goes all the way to checkout and stops, so you can confirm the total is $0.00 without buying anything.
-
----
+- The server stores **nothing personal**. Each purchase request carries the plate, phone and promo code from the visitor's own browser. The server keeps the run (plate, steps, result) in memory for 30 minutes so a phone can reconnect to it. Phone numbers and promo codes never appear in run data, and no log line includes them.
+- Personal details are saved only in each browser's `localStorage`.
+- Anyone can use the site with their own details, but only for this lot. Each visitor can start 30 purchases per hour, and at most 5 run at once. Requests from other websites are refused.
 
 ## How a purchase works
 
@@ -114,22 +138,22 @@ Before relying on a new parking time or promo code, open **Settings** and tap **
 6. Check out. This is the only irreversible step, and Cancel is disabled from here on.
 7. Read the receipt to get the end time.
 
-If anything fails before step 6, nothing was bought and **Try again** is safe. If the connection drops during step 6, the result is marked **Check your texts**, and the app asks before buying again for that plate for 30 minutes.
+If anything fails before step 6, nothing was bought and **Try again** is safe. If the connection drops during step 6, the result is marked **Check your texts**, and that device asks before buying again for that plate for 30 minutes.
 
-The fast engine uses TapNPark's private web API, which was reverse-engineered from their web app in October 2026. It's undocumented and could change. Every response is checked against the expected shape, so a change shows up as a clear error before checkout. In *Automatic* mode, the browser engine then takes over.
+The fast engine uses TapNPark's private web API, which was reverse-engineered from their web app in October 2026. It's undocumented and could change. Every response is checked against the expected shape, so a change shows up as a clear error before checkout.
 
 ## Project layout
 
 ```
 server/src/
-  app.ts            Express routes (auth, profile, rates, runs, Server-Sent Events)
-  auth.ts           Passcode login, signed cookie, rate limiting
-  runs.ts           Run manager: one at a time, idempotency, timeout, cancel, fallback, history
-  engines/          api.ts (fast), browser.ts (Playwright), fake.ts (simulation)
+  app.ts            Hono API (status, rates, runs, Server-Sent Events), shared by the Mac and the Worker
+  runs.ts           Run manager: per-plate lock, idempotency, timeout, cancel, fallback (in memory)
+  node.ts           Mac entry point (all engines, serves the built web app)
+  engines/          api.ts (fast), browser.ts (Playwright, Mac only), fake.ts (simulation)
   tapnpark/client.ts  TapNPark API client with response validation
-  store/            JSON file storage, profile validation
-shared/             Types and validation used by both server and web
-web/src/            React UI (Home, Run progress/result, Settings, History, Login)
+worker/index.ts     Cloudflare Worker + Durable Object entry point
+shared/             Types, validation and history guards used by server and web
+web/src/            React UI; store.ts keeps the profile and history in the browser
 tests/              Vitest suites
 scripts/            check-tapnpark.ts, make-icons.ts
 ```

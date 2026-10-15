@@ -1,65 +1,48 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { parkedUntil } from "../../../shared/history.ts";
 import { shortRateName } from "../../../shared/rates.ts";
-import type { Profile, Rate, Status } from "../../../shared/types.ts";
+import type { EngineMode, Profile, Rate, Status } from "../../../shared/types.ts";
 import { maskPhone } from "../../../shared/validate.ts";
 import { api, HttpError, local } from "../api.ts";
 import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
 import { Banner, Button, Card, ChipGroup, Page, Spinner } from "../components/ui.tsx";
 import { formatTime, newKey, timeLeft } from "../format.ts";
 import { navigate } from "../router.ts";
+import { startPurchase } from "../start.ts";
+import { saveProfile, useHistory } from "../store.ts";
 
 const RATES_CACHE = "auto-park:rates";
 
-export function useRates() {
-  const [rates, setRates] = useState<Rate[] | null>(() => local.get<Rate[]>(RATES_CACHE));
+export function useRates(engine: EngineMode) {
+  const cacheKey = `${RATES_CACHE}:${engine === "fake" ? "fake" : "live"}`;
+  const [rates, setRates] = useState<Rate[] | null>(() => local.get<Rate[]>(cacheKey));
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   useEffect(() => {
     let alive = true;
+    setLoading(true);
     api
-      .rates()
+      .rates(engine)
       .then(({ rates }) => {
         if (!alive) return;
         setRates(rates);
         setError(null);
-        local.set(RATES_CACHE, rates);
+        local.set(cacheKey, rates);
       })
       .catch((err) => alive && setError(err instanceof HttpError ? err.message : "Couldn't load parking times."))
       .finally(() => alive && setLoading(false));
     return () => {
       alive = false;
     };
-  }, []);
+  }, [engine, cacheKey]);
   return { rates, error, loading };
-}
-
-export function useStatus() {
-  const [status, setStatus] = useState<Status | null>(null);
-  useEffect(() => {
-    let alive = true;
-    const load = () =>
-      api
-        .status()
-        .then((s) => alive && setStatus(s))
-        .catch(() => {});
-    void load();
-    const onVisible = () => document.visibilityState === "visible" && load();
-    document.addEventListener("visibilitychange", onVisible);
-    const timer = setInterval(load, 60_000);
-    return () => {
-      alive = false;
-      document.removeEventListener("visibilitychange", onVisible);
-      clearInterval(timer);
-    };
-  }, []);
-  return status;
 }
 
 type Pending = { kind: "already_parked"; until: string } | { kind: "maybe_parked"; message: string };
 
-export function Home({ profile, onProfile }: { profile: Profile; onProfile: (p: Profile) => void }) {
-  const status = useStatus();
-  const { rates, error: ratesError, loading: ratesLoading } = useRates();
+export function Home({ profile, status, engine }: { profile: Profile; status: Status; engine: EngineMode }) {
+  const history = useHistory();
+  const { rates, error: ratesError, loading: ratesLoading } = useRates(engine);
   const [vehicleId, setVehicleId] = useState(profile.defaultVehicleId ?? profile.vehicles[0]?.id ?? "");
   const [rateName, setRateName] = useState(profile.preferredRate);
   const [busy, setBusy] = useState(false);
@@ -70,6 +53,8 @@ export function Home({ profile, onProfile }: { profile: Profile; onProfile: (p: 
 
   const vehicle = profile.vehicles.find((v) => v.id === vehicleId) ?? profile.vehicles[0];
   const needsSetup = !vehicle || !profile.phone;
+  const activeRun = history.find((r) => r.status === "running");
+  const parked = parkedUntil(history);
 
   const rateOptions = useMemo(() => {
     if (rates?.length) {
@@ -85,41 +70,32 @@ export function Home({ profile, onProfile }: { profile: Profile; onProfile: (p: 
     if (rateMissing && rates?.[0]) setRateName(rates[0].name);
   }, [rateMissing, rates]);
 
-  async function rememberChoices() {
-    if (vehicle && (vehicle.id !== profile.defaultVehicleId || rateName !== profile.preferredRate)) {
-      try {
-        onProfile(await api.saveProfile({ ...profile, defaultVehicleId: vehicle.id, preferredRate: rateName }));
-      } catch {
-        // Not worth blocking the purchase over.
-      }
-    }
-  }
-
   async function park(opts: { force?: boolean } = {}) {
     if (!vehicle) return;
     setBusy(true);
     setError(null);
     setPending(null);
+    // Remember this vehicle and time for next time.
+    if (vehicle.id !== profile.defaultVehicleId || rateName !== profile.preferredRate) {
+      saveProfile({ ...profile, defaultVehicleId: vehicle.id, preferredRate: rateName });
+    }
     tapKey.current ??= newKey();
-    try {
-      void rememberChoices();
-      const { run } = await api.startRun({ vehicleId: vehicle.id, rateName, force: opts.force, idempotencyKey: tapKey.current });
+    const result = await startPurchase({ profile, vehicle, rateName, engine, force: opts.force, idempotencyKey: tapKey.current });
+    setBusy(false);
+    if (result.kind === "started") {
       tapKey.current = null;
-      navigate(`/run/${run.id}`);
-    } catch (err) {
-      const e = err as HttpError;
-      if (e.status !== 0) tapKey.current = null; // the server answered; a new tap gets a new key
-      if (e.body?.error === "busy" && e.body.run) return navigate(`/run/${e.body.run.id}`);
-      if (e.body?.error === "already_parked" && e.body.until) setPending({ kind: "already_parked", until: e.body.until });
-      else if (e.body?.error === "maybe_parked") setPending({ kind: "maybe_parked", message: e.message });
-      else setError(e.message || "Couldn't start the purchase.");
-    } finally {
-      setBusy(false);
+      navigate(`/run/${result.run.id}`);
+    } else if (result.kind === "already_parked") {
+      setPending({ kind: "already_parked", until: result.until });
+    } else if (result.kind === "maybe_parked") {
+      setPending({ kind: "maybe_parked", message: result.message });
+    } else {
+      if (!result.offline) tapKey.current = null; // the server answered; a new tap gets a new key
+      setError(result.message);
     }
   }
 
-  const parked = status?.parkedUntil;
-  const simulated = profile.engine === "fake";
+  const simulated = engine === "fake";
 
   return (
     <Page
@@ -135,7 +111,7 @@ export function Home({ profile, onProfile }: { profile: Profile; onProfile: (p: 
         </nav>
       }
     >
-      <p className="-mt-3 text-slate-600">{status?.lotName ?? "MAC Member Parking"} on TapNPark</p>
+      <p className="-mt-3 text-slate-600">{status.lotName} on TapNPark</p>
 
       {simulated && (
         <Banner tone="info" title="Simulation mode">
@@ -143,9 +119,9 @@ export function Home({ profile, onProfile }: { profile: Profile; onProfile: (p: 
         </Banner>
       )}
 
-      {status?.activeRun && (
+      {activeRun && (
         <Banner tone="info" title="A purchase is in progress">
-          <Button variant="secondary" className="mt-2 w-full" onClick={() => navigate(`/run/${status.activeRun!.id}`)}>
+          <Button variant="secondary" className="mt-2 w-full" onClick={() => navigate(`/run/${activeRun.id}`)}>
             View progress
           </Button>
         </Banner>
@@ -160,7 +136,9 @@ export function Home({ profile, onProfile }: { profile: Profile; onProfile: (p: 
       {needsSetup ? (
         <Card>
           <h2 className="text-lg font-semibold">Set up your details</h2>
-          <p className="mt-1 text-slate-700">Add your plate and the phone number for receipts. You only do this once.</p>
+          <p className="mt-1 text-slate-700">
+            Add your plate and the phone number for receipts. They're saved only in this browser, on this device, so you only do this once here.
+          </p>
           <Button className="mt-4 w-full" onClick={() => navigate("/settings")}>
             Set up
           </Button>
@@ -188,7 +166,7 @@ export function Home({ profile, onProfile }: { profile: Profile; onProfile: (p: 
           </div>
 
           <div>
-            <Button className="min-h-16 w-full text-xl" loading={busy} onClick={() => park()} disabled={!!status?.activeRun}>
+            <Button className="min-h-16 w-full text-xl" loading={busy} onClick={() => park()} disabled={!!activeRun}>
               {busy ? "Starting…" : `Park ${vehicle!.plate}`}
             </Button>
             <p className="mt-3 text-center text-sm text-slate-600">
@@ -204,6 +182,8 @@ export function Home({ profile, onProfile }: { profile: Profile; onProfile: (p: 
           )}
         </Card>
       )}
+
+      <p className="text-center text-xs text-slate-600">Your details stay in this browser. Auto-Park's server doesn't keep them.</p>
 
       <ConfirmDialog
         open={!!pending}

@@ -1,11 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { shortRateName } from "../../../shared/rates.ts";
-import { STEPS, type Profile, type Run, type RunEvent, type StepStatus } from "../../../shared/types.ts";
+import { STEPS, type EngineMode, type Profile, type Run, type RunEvent, type StepStatus } from "../../../shared/types.ts";
 import { formatMoney, maskPhone } from "../../../shared/validate.ts";
 import { api, HttpError } from "../api.ts";
 import { Banner, Button, Card, cx, Page, Spinner, StatusPill } from "../components/ui.tsx";
 import { formatElapsed, formatTime, newKey, timeLeft } from "../format.ts";
+import { MESSAGES_LOST } from "../messages.ts";
 import { navigate } from "../router.ts";
+import { startPurchase } from "../start.ts";
+import { getHistory, recordRun } from "../store.ts";
 
 function applyEvent(run: Run, e: RunEvent): Run {
   switch (e.type) {
@@ -28,16 +31,35 @@ function applyEvent(run: Run, e: RunEvent): Run {
   }
 }
 
-/** Follows a run over Server-Sent Events, reconnecting if the phone drops off. */
+/** The server forgot this run (finished long ago, or restarted mid-run): fall back to this device's copy. */
+function lostRun(local: Run | null): Run | null {
+  if (!local) return null;
+  if (local.status !== "running") return local;
+  return { ...local, status: "unknown", finishedAt: new Date().toISOString(), outcome: { status: "unknown", message: MESSAGES_LOST } };
+}
+
+/** Follows a run over Server-Sent Events, reconnecting if the phone drops off. Every change is saved to this device's history. */
 function useLiveRun(id: string) {
-  const [run, setRun] = useState<Run | null>(null);
+  const [run, setRun] = useState<Run | null>(() => getHistory().find((r) => r.id === id) ?? null);
   const [error, setError] = useState<string | null>(null);
   const [reconnecting, setReconnecting] = useState(false);
+
+  useEffect(() => {
+    if (run) recordRun(run);
+  }, [run]);
 
   useEffect(() => {
     let closed = false;
     let source: EventSource | null = null;
     let retry: ReturnType<typeof setTimeout> | undefined;
+
+    const gone = () => {
+      closed = true;
+      source?.close();
+      const local = lostRun(getHistory().find((r) => r.id === id) ?? null);
+      if (local) setRun(local);
+      else setError("This purchase couldn't be found.");
+    };
 
     const connect = () => {
       source = new EventSource(`/api/runs/${id}/events`);
@@ -50,6 +72,7 @@ function useLiveRun(id: string) {
           source?.close();
         }
       };
+      source.addEventListener("gone", gone);
       source.onerror = () => {
         source?.close();
         if (closed) return;
@@ -64,7 +87,7 @@ function useLiveRun(id: string) {
             }
           })
           .catch((err) => {
-            if (err instanceof HttpError && err.status === 404) setError("This purchase couldn't be found.");
+            if (err instanceof HttpError && err.status === 404) gone();
             else {
               setReconnecting(true);
               retry = setTimeout(connect, 3000);
@@ -72,7 +95,10 @@ function useLiveRun(id: string) {
           });
       };
     };
-    connect();
+    // Finished runs from this device's history don't need the server.
+    const local = getHistory().find((r) => r.id === id);
+    if (local && local.status !== "running") closed = true;
+    else connect();
     return () => {
       closed = true;
       source?.close();
@@ -243,7 +269,7 @@ function Result({ run, profile, onRetry, retrying }: { run: Run; profile: Profil
   );
 }
 
-export function RunView({ id, profile }: { id: string; profile: Profile }) {
+export function RunView({ id, profile, engine }: { id: string; profile: Profile; engine: EngineMode }) {
   const { run, error, reconnecting } = useLiveRun(id);
   const logs = run?.logs ?? [];
   const [now, setNow] = useState(Date.now());
@@ -273,32 +299,27 @@ export function RunView({ id, profile }: { id: string; profile: Profile }) {
 
   async function retry(opts: { allowLotMismatch?: boolean } = {}) {
     if (!run) return;
-    const vehicle = profile.vehicles.find((v) => v.plate === run.plate);
-    if (!vehicle) {
-      setActionError("That vehicle is no longer in your settings.");
-      return;
-    }
+    const vehicle = profile.vehicles.find((v) => v.plate === run.plate) ?? { id: "", plate: run.plate, nickname: run.vehicleName === run.plate ? "" : run.vehicleName };
     setRetrying(true);
     setActionError(null);
     retryKey.current ??= newKey();
-    try {
-      const res = await api.startRun({
-        vehicleId: vehicle.id,
-        rateName: run.rateName,
-        dryRun: run.dryRun,
-        allowLotMismatch: opts.allowLotMismatch,
-        force: opts.allowLotMismatch,
-        idempotencyKey: retryKey.current,
-      });
+    const result = await startPurchase({
+      profile,
+      vehicle,
+      rateName: run.rateName,
+      engine,
+      dryRun: run.dryRun,
+      allowLotMismatch: opts.allowLotMismatch,
+      force: true,
+      idempotencyKey: retryKey.current,
+    });
+    setRetrying(false);
+    if (result.kind === "started") {
       retryKey.current = null;
-      navigate(`/run/${res.run.id}`, { replace: true });
-    } catch (err) {
-      const e = err as HttpError;
-      if (e.status !== 0) retryKey.current = null;
-      if (e.body?.error === "busy" && e.body.run) navigate(`/run/${e.body.run.id}`, { replace: true });
-      else setActionError(e.message);
-    } finally {
-      setRetrying(false);
+      navigate(`/run/${result.run.id}`, { replace: true });
+    } else if (result.kind === "failed") {
+      if (!result.offline) retryKey.current = null;
+      setActionError(result.message);
     }
   }
 

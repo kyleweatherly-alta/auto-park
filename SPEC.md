@@ -178,7 +178,7 @@ The baseline items are already planned: mobile-first layout, real form with inli
 
 Use a lighter stack than Next.js on Vercel: **Vite + React + TypeScript + Tailwind for the UI, plus one small Node (Express) server that runs Playwright**.
 
-> **Decision (2026-10-15):** Auto-Park runs locally as a Claude Code project on Kyle's Mac. It has no external hosting and no Replit.
+> **Decisions (2026-10-15):** No Replit. Auto-Park is public on Cloudflare Workers (auto-park.kyle-weatherly.workers.dev) with **no passcode**. To make that safe, the server stores nothing personal: each device keeps its own details in the browser.
 
 - The core of this app is a long-running headless-Chromium job. On Vercel's serverless functions that is fragile: the Chromium bundle is large, cold starts are slow, and functions have time limits.
 - The UI is a single screen, so Next.js's routing and SSR add nothing.

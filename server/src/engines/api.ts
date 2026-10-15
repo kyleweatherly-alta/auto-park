@@ -30,7 +30,7 @@ export function toRate(r: { rateID: string; rateName: string; rateAmount: number
 export class ApiEngine implements Engine {
   readonly name = "api" as const;
 
-  constructor(private readonly fetchImpl: typeof fetch = fetch) {}
+  constructor(private readonly fetchImpl: typeof fetch = (input, init) => fetch(input, init)) {}
 
   async unavailableReason() {
     return null;
@@ -112,16 +112,16 @@ export class ApiEngine implements Engine {
       // Promo
       let promoApplied = false;
       if (req.promoCode) {
-        ctx.step("promo", "active", req.promoCode);
+        ctx.step("promo", "active");
         try {
           const updated = await s.applyPromo(req.promoCode);
           if (!updated) {
             ctx.step("promo", "failed");
-            return outcome("promo_rejected", `TapNPark didn't accept the promo code ${req.promoCode}. Nothing was bought.`, { rateName });
+            return outcome("promo_rejected", "TapNPark didn't accept the promo code. Nothing was bought.", { rateName });
           }
           details = updated;
           promoApplied = true;
-          ctx.step("promo", "done", details.promoCodeRedeemCopy || req.promoCode);
+          ctx.step("promo", "done", "Applied");
         } catch (err) {
           if (err instanceof TapNParkError && err.failReason && err.failReason !== "SystemError" && err.httpStatus && err.httpStatus < 500) {
             ctx.step("promo", "failed");
@@ -152,7 +152,7 @@ export class ApiEngine implements Engine {
         ctx.step("receipt", "skipped", "Test run");
         return outcome(
           "dry_run_ok",
-          `Test run passed: ${shortRateName(rateName)} would cost ${formatMoney(amountDue)}${promoApplied ? ` with ${req.promoCode}` : ""}. Nothing was bought.`,
+          `Test run passed: ${shortRateName(rateName)} would cost ${formatMoney(amountDue)}${promoApplied ? " with your promo code" : ""}. Nothing was bought.`,
           { amountDue, rateName, promoApplied },
         );
       }

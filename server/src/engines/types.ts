@@ -23,7 +23,7 @@ export interface EngineContext {
    * returns true the run can no longer be cancelled.
    */
   commit(): boolean;
-  saveScreenshot(png: Buffer): Promise<void>;
+  saveScreenshot(png: Uint8Array): Promise<void>;
 }
 
 export interface Engine {

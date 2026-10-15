@@ -1,13 +1,9 @@
-import { mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import path from "node:path";
 import { describe, expect, it } from "vitest";
 import type { Run, RunEvent, RunOutcome } from "../shared/types.ts";
 import { FakeEngine } from "../server/src/engines/fake.ts";
 import { EngineError, type Engine, type EngineContext } from "../server/src/engines/types.ts";
-import { RunManager } from "../server/src/runs.ts";
-import { MemoryKV } from "../server/src/store/kv.ts";
-import { Repo } from "../server/src/store/repo.ts";
+import { RunManager, type RunInput } from "../server/src/runs.ts";
+import { MemoryScreenshots } from "../server/src/screenshots.ts";
 
 function stubEngine(name: "api" | "browser", impl: (ctx: EngineContext) => Promise<RunOutcome>, unavailable: string | null = null): Engine & { calls: number } {
   const e = {
@@ -28,93 +24,114 @@ const ok = async (ctx: EngineContext): Promise<RunOutcome> => {
   return { status: "success", message: "Parked.", endTime: new Date(Date.now() + 3 * 3600_000).toISOString(), committed: true };
 };
 
-async function setup(opts: { engine?: "auto" | "api" | "browser" | "fake"; api?: Engine; browser?: Engine; timeoutMs?: number } = {}) {
-  const repo = new Repo(new MemoryKV(), { plate: "ABC1234", phone: "414-555-0199", promo: "PROMO1", rate: "", engine: opts.engine ?? "auto" });
-  const profile = await repo.getProfile();
-  await repo.saveProfile(profile);
-  const runs = new RunManager({
-    repo,
+function setup(opts: { api?: Engine; browser?: Engine; timeoutMs?: number; maxConcurrent?: number } = {}) {
+  return new RunManager({
     engines: { api: opts.api ?? stubEngine("api", ok), browser: opts.browser ?? stubEngine("browser", ok), fake: new FakeEngine(5) },
     lotCode: "Q60x6xih",
-    lotName: "MAC Member Parking",
-    defaultEngine: "auto",
     timeoutMs: opts.timeoutMs ?? 5000,
-    screenshotsDir: path.join(await mkdtemp(path.join(tmpdir(), "ap-")), "shots"),
+    screenshots: new MemoryScreenshots(),
+    maxConcurrent: opts.maxConcurrent,
     log: () => {},
   });
-  return { repo, runs, vehicleId: profile.vehicles[0]!.id };
+}
+
+let n = 0;
+function input(over: Partial<RunInput> = {}): RunInput {
+  return {
+    plate: "ABC1234",
+    phone: "+14145550199",
+    promoCode: "PROMO1",
+    rateName: "",
+    vehicleName: "",
+    engine: "api",
+    dryRun: false,
+    allowLotMismatch: false,
+    idempotencyKey: `key-${++n}-xxxxxx`,
+    ...over,
+  };
 }
 
 function finished(runs: RunManager, id: string): Promise<Run> {
   return new Promise((resolve) => {
-    void runs.subscribe(id, (e: RunEvent) => e.type === "done" && resolve(e.run));
+    runs.subscribe(id, (e: RunEvent) => e.type === "done" && resolve(e.run));
   });
 }
 
+function started(r: ReturnType<RunManager["start"]>): Run {
+  if (!r.ok) throw new Error(`expected a run, got ${r.code}`);
+  return r.run;
+}
+
 describe("RunManager", () => {
-  it("runs a purchase and records it in history", async () => {
-    const { runs, repo, vehicleId } = await setup();
-    const started = await runs.start({ vehicleId, idempotencyKey: "tap-1-xxxx" });
-    expect(started.ok).toBe(true);
-    const run = await finished(runs, (started as { run: Run }).run.id);
-    expect(run.status).toBe("success");
-    expect((await repo.listRuns())[0]).toMatchObject({ id: run.id, status: "success", plate: "ABC1234" });
+  it("runs a purchase and never exposes the phone or promo code", async () => {
+    const runs = setup();
+    const run = started(runs.start(input()));
+    const done = await finished(runs, run.id);
+    expect(done.status).toBe("success");
+    expect(JSON.stringify(done)).not.toContain("4145550199");
+    expect(JSON.stringify(done)).not.toContain("PROMO1");
   });
 
-  it("only allows one purchase at a time", async () => {
+  it("allows one purchase per plate at a time, but different plates in parallel", async () => {
     let release!: () => void;
-    const slow = stubEngine("api", (ctx) => new Promise((r) => (release = () => r(ok(ctx)))));
-    const { runs, vehicleId } = await setup({ engine: "api", api: slow });
-    const a = await runs.start({ vehicleId, idempotencyKey: "tap-a-xxxx" });
-    const b = await runs.start({ vehicleId, idempotencyKey: "tap-b-xxxx" });
-    expect(a.ok).toBe(true);
-    expect(b).toMatchObject({ ok: false, code: "busy" });
+    const gate = new Promise<void>((r) => (release = r));
+    const slow = stubEngine("api", async (ctx) => {
+      await gate;
+      return ok(ctx);
+    });
+    const runs = setup({ api: slow });
+    const a = started(runs.start(input()));
+    expect(runs.start(input())).toMatchObject({ ok: false, code: "busy", run: { id: a.id } });
+    const other = started(runs.start(input({ plate: "XYZ987" })));
     release();
-    await finished(runs, (a as { run: Run }).run.id);
-    expect(slow.calls).toBe(1);
+    await Promise.all([finished(runs, a.id), finished(runs, other.id)]);
+    expect(slow.calls).toBe(2);
+    // The plate is free again once its run finishes.
+    expect(runs.start(input()).ok).toBe(true);
+  });
+
+  it("caps how many purchases run at once", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const runs = setup({ api: stubEngine("api", async (ctx) => (await gate, ok(ctx))), maxConcurrent: 2 });
+    const a = started(runs.start(input({ plate: "AAA111" })));
+    const b = started(runs.start(input({ plate: "BBB222" })));
+    expect(runs.start(input({ plate: "CCC333" }))).toMatchObject({ ok: false, code: "too_many" });
+    release();
+    await Promise.all([finished(runs, a.id), finished(runs, b.id)]);
   });
 
   it("returns the same run for a repeated tap (idempotency key)", async () => {
     const api = stubEngine("api", ok);
-    const { runs, vehicleId } = await setup({ engine: "api", api });
-    const a = await runs.start({ vehicleId, idempotencyKey: "same-key-1" });
-    const b = await runs.start({ vehicleId, idempotencyKey: "same-key-1" });
-    expect(b).toMatchObject({ ok: true, existing: true, run: { id: (a as { run: Run }).run.id } });
-    await finished(runs, (a as { run: Run }).run.id);
+    const runs = setup({ api });
+    const a = started(runs.start(input({ idempotencyKey: "same-key-1" })));
+    expect(runs.start(input({ idempotencyKey: "same-key-1" }))).toMatchObject({ ok: true, existing: true, run: { id: a.id } });
+    await finished(runs, a.id);
+    expect(runs.start(input({ idempotencyKey: "same-key-1" }))).toMatchObject({ ok: true, existing: true, run: { id: a.id } });
     expect(api.calls).toBe(1);
   });
 
-  it("asks before buying again while the plate is still parked", async () => {
-    const { runs, vehicleId } = await setup({ engine: "api" });
-    const first = await runs.start({ vehicleId, idempotencyKey: "first-tap-1" });
-    await finished(runs, (first as { run: Run }).run.id);
-
-    const second = await runs.start({ vehicleId, idempotencyKey: "second-tap-1" });
-    expect(second).toMatchObject({ ok: false, code: "already_parked" });
-
-    const forced = await runs.start({ vehicleId, idempotencyKey: "third-tap-1", force: true });
-    expect(forced.ok).toBe(true);
-    await finished(runs, (forced as { run: Run }).run.id);
-  });
-
-  it("test runs skip the already-parked check", async () => {
-    const { runs, vehicleId } = await setup({ engine: "api" });
-    const first = await runs.start({ vehicleId, idempotencyKey: "first-tap-2" });
-    await finished(runs, (first as { run: Run }).run.id);
-    expect((await runs.start({ vehicleId, idempotencyKey: "dry-tap-2", dryRun: true })).ok).toBe(true);
-  });
-
-  it("falls back to the browser when the fast engine breaks before checkout", async () => {
+  it("falls back to the browser when the fast engine breaks before checkout (auto mode)", async () => {
     const api = stubEngine("api", async () => {
       throw new EngineError("TapNPark /rates returned an unexpected response");
     });
     const browser = stubEngine("browser", ok);
-    const { runs, vehicleId } = await setup({ engine: "auto", api, browser });
-    const s = await runs.start({ vehicleId, idempotencyKey: "fallback-1" });
-    const run = await finished(runs, (s as { run: Run }).run.id);
+    const runs = setup({ api, browser });
+    const run = await finished(runs, started(runs.start(input({ engine: "auto" }))).id);
     expect(run).toMatchObject({ status: "success", engine: "browser", fellBackFrom: "api" });
     expect(run.logs[0]).toMatch(/Retrying in the browser/);
     expect(browser.calls).toBe(1);
+  });
+
+  it("reports an error, not a fallback, when the browser engine isn't available (cloud)", async () => {
+    const api = stubEngine("api", async () => {
+      throw new EngineError("boom");
+    });
+    const browser = stubEngine("browser", ok, "The browser engine only runs on the Mac version.");
+    const runs = setup({ api, browser });
+    const run = await finished(runs, started(runs.start(input({ engine: "auto" }))).id);
+    expect(run.status).toBe("error");
+    expect(browser.calls).toBe(0);
   });
 
   it("never falls back after checkout started; reports the outcome as unknown", async () => {
@@ -123,36 +140,30 @@ describe("RunManager", () => {
       throw new EngineError("socket hang up", true);
     });
     const browser = stubEngine("browser", ok);
-    const { runs, vehicleId } = await setup({ engine: "auto", api, browser });
-    const s = await runs.start({ vehicleId, idempotencyKey: "unknown-1" });
-    const run = await finished(runs, (s as { run: Run }).run.id);
+    const runs = setup({ api, browser });
+    const run = await finished(runs, started(runs.start(input({ engine: "auto" }))).id);
     expect(run.status).toBe("unknown");
     expect(browser.calls).toBe(0);
-
-    // ...and asks before buying again
-    expect(await runs.start({ vehicleId, idempotencyKey: "unknown-2" })).toMatchObject({ ok: false, code: "maybe_parked" });
   });
 
-  it("does not fall back in api-only mode", async () => {
-    const api = stubEngine("api", async () => {
-      throw new EngineError("boom");
+  it("does not fall back in fast-only mode", async () => {
+    const runs = setup({
+      api: stubEngine("api", async () => {
+        throw new EngineError("boom");
+      }),
     });
-    const browser = stubEngine("browser", ok);
-    const { runs, vehicleId } = await setup({ engine: "api", api, browser });
-    const s = await runs.start({ vehicleId, idempotencyKey: "nofallback-1" });
-    const run = await finished(runs, (s as { run: Run }).run.id);
+    const run = await finished(runs, started(runs.start(input())).id);
     expect(run.status).toBe("error");
     expect(run.outcome?.message).toContain("Nothing was bought");
-    expect(browser.calls).toBe(0);
   });
 
   it("can be cancelled before checkout, not after", async () => {
-    const { runs, vehicleId } = await setup({ engine: "fake" });
-    const s = await runs.start({ vehicleId, idempotencyKey: "cancel-1" });
-    const id = (s as { run: Run }).run.id;
-    expect(runs.cancel(id)).toEqual({ ok: true });
-    const run = await finished(runs, id);
-    expect(run.status).toBe("cancelled");
+    const runs = setup();
+    const a = started(runs.start(input({ engine: "fake" })));
+    expect(runs.cancel(a.id)).toEqual({ ok: true });
+    const cancelled = await finished(runs, a.id);
+    expect(cancelled.status).toBe("cancelled");
+    expect(cancelled.steps.some((s) => s.status === "failed")).toBe(false);
 
     let proceed!: () => void;
     const api = stubEngine("api", async (ctx) => {
@@ -160,34 +171,31 @@ describe("RunManager", () => {
       await new Promise<void>((r) => (proceed = r));
       return { status: "success", message: "Parked.", committed: true };
     });
-    const second = await setup({ engine: "api", api });
-    const s2 = await second.runs.start({ vehicleId: second.vehicleId, idempotencyKey: "cancel-2" });
+    const second = setup({ api });
+    const b = started(second.start(input()));
     await new Promise((r) => setTimeout(r, 0));
-    expect(second.runs.cancel((s2 as { run: Run }).run.id)).toEqual({ ok: false, code: "too_late" });
+    expect(second.cancel(b.id)).toEqual({ ok: false, code: "too_late" });
     proceed();
-    await finished(second.runs, (s2 as { run: Run }).run.id);
+    await finished(second, b.id);
   });
 
   it("times out stuck runs without buying", async () => {
     const api = stubEngine("api", (ctx) => new Promise((_, reject) => ctx.signal.addEventListener("abort", () => reject(ctx.signal.reason))));
-    const { runs, vehicleId } = await setup({ engine: "api", api, timeoutMs: 30 });
-    const s = await runs.start({ vehicleId, idempotencyKey: "timeout-1" });
-    const run = await finished(runs, (s as { run: Run }).run.id);
+    const runs = setup({ api, timeoutMs: 30 });
+    const run = await finished(runs, started(runs.start(input())).id);
     expect(run.status).toBe("timeout");
   });
 
-  it("marks runs interrupted by a restart as unknown", async () => {
-    const { runs, repo } = await setup();
-    await repo.saveRun({ id: "r1", createdAt: new Date().toISOString(), plate: "ABC1234", vehicleName: "ABC1234", rateName: "", dryRun: false, engine: "api", status: "running", steps: [], hasScreenshot: false, logs: [] });
-    await runs.recoverInterrupted();
-    expect((await repo.listRuns())[0]).toMatchObject({ id: "r1", status: "unknown" });
-  });
-
   it("drives the simulated engine through every step", async () => {
-    const { runs, vehicleId } = await setup({ engine: "fake" });
-    const s = await runs.start({ vehicleId, idempotencyKey: "fake-1" });
-    const run = await finished(runs, (s as { run: Run }).run.id);
+    const runs = setup();
+    const run = await finished(runs, started(runs.start(input({ engine: "fake" }))).id);
     expect(run.status).toBe("success");
     expect(run.steps.every((st) => st.status === "done")).toBe(true);
+  });
+
+  it("returns null for runs it doesn't know", () => {
+    const runs = setup();
+    expect(runs.getRun("nope")).toBeNull();
+    expect(runs.subscribe("nope", () => {})).toBeNull();
   });
 });

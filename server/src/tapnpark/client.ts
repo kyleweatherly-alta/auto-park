@@ -112,7 +112,7 @@ export class TapNParkSession {
   private token: string | null = null;
 
   constructor(
-    private readonly fetchImpl: FetchLike = fetch,
+    private readonly fetchImpl: FetchLike = (input, init) => fetch(input, init),
     private readonly signal?: AbortSignal,
   ) {}
 
