@@ -2,7 +2,7 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "auto-park",
   // Kyle's personal Cloudflare account (kyle.weatherly@gmail.com), which holds kyleweatherly.com.
-  // Deploy with XDG_CONFIG_HOME=~/.config/kyle-personal so Alta's wrangler sign-in isn't used.
+  // Deploy with XDG_CONFIG_HOME=~/.config/wrangler-personal so Alta's wrangler sign-in isn't used.
   "account_id": "b79e4796d5980902455aa2a35993b36b",
   "main": "worker/index.ts",
   "routes": [{ "pattern": "park.kyleweatherly.com", "custom_domain": true }],

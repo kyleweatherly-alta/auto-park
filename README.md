@@ -2,7 +2,9 @@
 
 One-tap parking for the **MAC Member Parking** lot on TapNPark (lot `Q60x6xih`). Open it, pick a time, tap **Park**. It applies your promo code and buys the session only if the total comes to **$0.00**. Then it shows when the session ends.
 
-**Live:** https://auto-park.kyle-weatherly.workers.dev (public, no login)
+**Live:** https://park.kyleweatherly.com (public, no login)
+
+Moved Nov 19, 2026 from auto-park.kyle-weatherly.workers.dev (Alta Medical's Cloudflare account), which still runs for now. Details saved in the browser don't carry over to the new address: tap **Set up** there once and re-add the Home Screen icon. After that, the old `auto-park` Worker in Alta's account can be deleted.
 
 - **Your details stay on your phone.** Your plate, phone number, promo code and history are saved only in your browser. The server uses them for one purchase and keeps nothing, so a visitor sees an empty form, never yours.
 - **Live progress.** The checklist shows the real steps, and you can cancel at any point up to checkout.
@@ -26,13 +28,15 @@ Each browser keeps its own details. Another phone, or a private window, starts e
 
 ## Deploy updates (Cloudflare)
 
-The site is a Cloudflare Worker (`wrangler.jsonc`). It serves the built web app as static assets and sends `/api/*` to one Durable Object, which runs purchases in memory and stores nothing. To publish a change:
+The site is a Cloudflare Worker (`wrangler.jsonc`) on Kyle's personal Cloudflare account ("Kyle.weatherly@gmail.com's Account", pinned by `account_id`). It answers only at the custom domain park.kyleweatherly.com, with no `workers.dev` address. It serves the built web app as static assets and sends `/api/*` to one Durable Object, which runs purchases in memory and stores nothing. To publish a change:
 
 ```bash
+export XDG_CONFIG_HOME=~/.config/wrangler-personal   # the personal account's wrangler sign-in, kept apart from Alta's
+npx wrangler login                               # once per computer, as kyle.weatherly@gmail.com
 npm run deploy
 ```
 
-That builds the web app and runs `wrangler deploy`. You must be logged in with `npx wrangler login`. Settings live in `vars` in `wrangler.jsonc`:
+That builds the web app and runs `wrangler deploy`. Without `XDG_CONFIG_HOME`, wrangler uses Alta Medical's sign-in, and the deploy fails because that sign-in can't reach the personal account. Settings live in `vars` in `wrangler.jsonc`:
 - `PARK_ENGINE` is `api`.
 - `RUNS_PER_HOUR` caps how many purchases each visitor can start per hour (30).
 - `LOT_CODE` and `LOT_NAME` identify the lot.
